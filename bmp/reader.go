@@ -26,6 +26,41 @@ func readUint32(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }
 
+// decodePaletted4 reads a 4 bit-per-pixel BMP image from r.
+// If topDown is false, the image rows will be read bottom-up.
+func decodePaletted4(r io.Reader, c image.Config, topDown bool) (image.Image, error) {
+	paletted := image.NewPaletted(image.Rect(0, 0, c.Width, c.Height), c.ColorModel.(color.Palette))
+	if c.Width == 0 || c.Height == 0 {
+		return paletted, nil
+	}
+	var tmp [4]byte
+	y0, y1, yDelta := c.Height-1, -1, -1
+	if topDown {
+		y0, y1, yDelta = 0, c.Height, +1
+	}
+	buf := make([]byte, (c.Width+1)/2)
+	for y := y0; y != y1; y += yDelta {
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, err
+		}
+		for x := 0; x < c.Width; x++ {
+			if x%2 == 0 {
+				paletted.Pix[y*paletted.Stride+x] = buf[x/2] >> 4
+			} else {
+				paletted.Pix[y*paletted.Stride+x] = buf[(x-1)/2] & 0x0F
+			}
+		}
+		// Each row is 4-byte aligned.
+		if len(buf)%4 != 0 {
+			_, err := io.ReadFull(r, tmp[:4-len(buf)%4])
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return paletted, nil
+}
+
 // decodePaletted reads an 8 bit-per-pixel BMP image from r.
 // If topDown is false, the image rows will be read bottom-up.
 func decodePaletted(r io.Reader, c image.Config, topDown bool) (image.Image, error) {
@@ -115,6 +150,8 @@ func Decode(r io.Reader) (image.Image, error) {
 		return nil, err
 	}
 	switch bpp {
+	case 4:
+		return decodePaletted4(r, c, topDown)
 	case 8:
 		return decodePaletted(r, c, topDown)
 	case 24:
@@ -165,6 +202,21 @@ func decodeConfig(r io.Reader) (config image.Config, bitsPerPixel int, topDown b
 		return image.Config{}, 0, false, ErrUnsupported
 	}
 	switch bpp {
+	case 4:
+		if offset != fileHeaderLen+infoHeaderLen+16*4 {
+			return image.Config{}, 0, false, ErrUnsupported
+		}
+		_, err = io.ReadFull(r, b[:16*4])
+		if err != nil {
+			return image.Config{}, 0, false, err
+		}
+		pcm := make(color.Palette, 16)
+		for i := range pcm {
+			// BMP images are stored in BGR order rather than RGB order.
+			// Every 4th byte is padding.
+			pcm[i] = color.RGBA{b[4*i+2], b[4*i+1], b[4*i+0], 0xFF}
+		}
+		return image.Config{ColorModel: pcm, Width: width, Height: height}, 4, topDown, nil
 	case 8:
 		if offset != fileHeaderLen+infoHeaderLen+256*4 {
 			return image.Config{}, 0, false, ErrUnsupported
